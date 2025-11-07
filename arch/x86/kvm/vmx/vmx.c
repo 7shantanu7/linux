@@ -6104,6 +6104,83 @@ static int handle_wrmsr_imm(struct kvm_vcpu *vcpu)
  * may resume.  Otherwise they set the kvm_run parameter to indicate what needs
  * to be done to userspace and return 0.
  */
+static const char *get_exit_reason_name(u32 exit_reason)
+{
+	switch (exit_reason) {
+	case EXIT_REASON_EXCEPTION_NMI:        return "Exception/NMI Exit";
+	case EXIT_REASON_EXTERNAL_INTERRUPT:   return "External Interrupt Exit";
+	case EXIT_REASON_TRIPLE_FAULT:         return "Triple Fault Exit";
+	case EXIT_REASON_INIT_SIGNAL:          return "INIT Signal Exit";
+	case EXIT_REASON_SIPI_SIGNAL:          return "SIPI Signal Exit";
+	case EXIT_REASON_OTHER_SMI:            return "Other SMI Exit";
+	case EXIT_REASON_INTERRUPT_WINDOW:     return "Interrupt Window Exit";
+	case EXIT_REASON_NMI_WINDOW:           return "NMI Window Exit";
+	case EXIT_REASON_TASK_SWITCH:          return "Task Switch Exit";
+	case EXIT_REASON_CPUID:                return "CPUID Exit";
+	case EXIT_REASON_HLT:                  return "HLT Exit";
+	case EXIT_REASON_INVD:                 return "INVD Exit";
+	case EXIT_REASON_INVLPG:               return "INVLPG Exit";
+	case EXIT_REASON_RDPMC:                return "RDPMC Exit";
+	case EXIT_REASON_RDTSC:                return "RDTSC Exit";
+	case EXIT_REASON_VMCALL:               return "VMCALL Exit";
+	case EXIT_REASON_VMCLEAR:              return "VMCLEAR Exit";
+	case EXIT_REASON_VMLAUNCH:             return "VMLAUNCH Exit";
+	case EXIT_REASON_VMPTRLD:              return "VMPTRLD Exit";
+	case EXIT_REASON_VMPTRST:              return "VMPTRST Exit";
+	case EXIT_REASON_VMREAD:               return "VMREAD Exit";
+	case EXIT_REASON_VMRESUME:             return "VMRESUME Exit";
+	case EXIT_REASON_VMWRITE:              return "VMWRITE Exit";
+	case EXIT_REASON_VMOFF:                return "VMOFF Exit";
+	case EXIT_REASON_VMON:                 return "VMON Exit";
+	case EXIT_REASON_CR_ACCESS:            return "CR Access Exit";
+	case EXIT_REASON_DR_ACCESS:            return "DR Access Exit";
+	case EXIT_REASON_IO_INSTRUCTION:       return "IO Instruction Exit";
+	case EXIT_REASON_MSR_READ:             return "MSR Read Exit";
+	case EXIT_REASON_MSR_WRITE:            return "MSR Write Exit";
+	case EXIT_REASON_INVALID_STATE:        return "Invalid State Exit";
+	case EXIT_REASON_MSR_LOAD_FAIL:        return "MSR Load Fail Exit";
+	case EXIT_REASON_MWAIT_INSTRUCTION:    return "MWAIT Instruction Exit";
+	case EXIT_REASON_MONITOR_TRAP_FLAG:    return "Monitor Trap Flag Exit";
+	case EXIT_REASON_MONITOR_INSTRUCTION:  return "Monitor Instruction Exit";
+	case EXIT_REASON_PAUSE_INSTRUCTION:    return "Pause Instruction Exit";
+	case EXIT_REASON_MCE_DURING_VMENTRY:   return "MCE During VMEntry Exit";
+	case EXIT_REASON_TPR_BELOW_THRESHOLD:  return "TPR Below Threshold Exit";
+	case EXIT_REASON_APIC_ACCESS:          return "APIC Access Exit";
+	case EXIT_REASON_EOI_INDUCED:          return "EOI Induced Exit";
+	case EXIT_REASON_GDTR_IDTR:            return "GDTR/IDTR Exit";
+	case EXIT_REASON_LDTR_TR:              return "LDTR/TR Exit";
+	case EXIT_REASON_EPT_VIOLATION:        return "EPT Violation Exit";
+	case EXIT_REASON_EPT_MISCONFIG:        return "EPT Misconfig Exit";
+	case EXIT_REASON_INVEPT:               return "INVEPT Exit";
+	case EXIT_REASON_RDTSCP:               return "RDTSCP Exit";
+	case EXIT_REASON_PREEMPTION_TIMER:     return "Preemption Timer Exit";
+	case EXIT_REASON_INVVPID:              return "INVVPID Exit";
+	case EXIT_REASON_WBINVD:               return "WBINVD Exit";
+	case EXIT_REASON_XSETBV:               return "XSETBV Exit";
+	case EXIT_REASON_APIC_WRITE:           return "APIC Write Exit";
+	case EXIT_REASON_RDRAND:               return "RDRAND Exit";
+	case EXIT_REASON_INVPCID:              return "INVPCID Exit";
+	case EXIT_REASON_VMFUNC:               return "VMFUNC Exit";
+	case EXIT_REASON_ENCLS:                return "ENCLS Exit";
+	case EXIT_REASON_RDSEED:               return "RDSEED Exit";
+	case EXIT_REASON_PML_FULL:             return "PML Full Exit";
+	case EXIT_REASON_XSAVES:               return "XSAVES Exit";
+	case EXIT_REASON_XRSTORS:              return "XRSTORS Exit";
+	case EXIT_REASON_UMWAIT:               return "UMWAIT Exit";
+	case EXIT_REASON_TPAUSE:               return "TPAUSE Exit";
+	case EXIT_REASON_BUS_LOCK:             return "Bus Lock Exit";
+	case EXIT_REASON_NOTIFY:               return "Notify Exit";
+	case EXIT_REASON_TDCALL:               return "TDCALL Exit";
+	case EXIT_REASON_MSR_READ_IMM:         return "MSR Read IMM Exit";
+	case EXIT_REASON_MSR_WRITE_IMM:        return "MSR Write IMM Exit";
+	default:                               return "Unknown Exit";
+	}
+}
+
+/* Global counters for VM exit statistics */
+static atomic64_t vm_exit_counters[256] = {ATOMIC64_INIT(0)};
+static atomic64_t total_vm_exits = ATOMIC64_INIT(0);
+
 static int (*kvm_vmx_exit_handlers[])(struct kvm_vcpu *vcpu) = {
 	[EXIT_REASON_EXCEPTION_NMI]           = handle_exception_nmi,
 	[EXIT_REASON_EXTERNAL_INTERRUPT]      = handle_external_interrupt,
@@ -6476,6 +6553,25 @@ static int __vmx_handle_exit(struct kvm_vcpu *vcpu, fastpath_t exit_fastpath)
 {
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
 	union vmx_exit_reason exit_reason = vmx_get_exit_reason(vcpu);
+
+	/* Assignment 2: Track VM exit statistics */
+	u32 exit_type = exit_reason.basic;
+	atomic64_inc(&vm_exit_counters[exit_type]);
+	long long total = (long long)atomic64_inc_return(&total_vm_exits);
+	
+	/* Print statistics every 10,000 exits */
+	if (total % 10000 == 0) {
+		int i;
+		printk(KERN_INFO "=== VM Exit Statistics (Total: %lld) ===\n", total);
+		for (i = 0; i < 256; i++) {
+			long long count = atomic64_read(&vm_exit_counters[i]);
+			if (count > 0) {
+				printk(KERN_INFO "Exit %d (%s): %lld\\n",
+				       i, get_exit_reason_name(i), count);
+			}
+		}
+		printk(KERN_INFO "========================================\\n");
+	}
 	u32 vectoring_info = vmx->idt_vectoring_info;
 	u16 exit_handler_index;
 
